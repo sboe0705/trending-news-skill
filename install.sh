@@ -110,5 +110,4 @@ fi
 
 if [[ "$TARGET_DIR" == *"/.claude/skills" ]]; then
   echo "Start a new Claude Code session and use /$SKILL_NAME, or ask \"what is trending right now?\"."
-  echo "For a briefing every 4 hours, also run ./scheduler/install-timer.sh."
 fi

@@ -71,33 +71,9 @@ Python 3.9+ and no third-party packages.
 
 ## Run it every 4 hours
 
-The scheduler is a systemd user timer (Linux) that runs Claude Code headless:
-
-```bash
-./scheduler/install-timer.sh               # install + enable (runs at 0, 4, 8, 12, 16, 20 h)
-systemctl --user start trending-news       # run once now
-systemctl --user list-timers trending-news # next run
-./scheduler/install-timer.sh --uninstall   # remove
-```
-
-Each run calls `claude -p "/trending-news"` from this repository and:
-
-- saves the briefing to `~/trending-news/YYYY-MM-DD_HHMM.md`, with `latest.md` linking to the newest one
-- shows a desktop notification with the topic names
-- stays silent when no trend has a clear reason: no file, no notification (the journal notes the run)
-
-You can configure it with environment variables, using `systemctl --user edit trending-news`:
-
-| Variable            | Default            | Purpose                                   |
-|---------------------|--------------------|-------------------------------------------|
-| `TRENDING_NEWS_DIR` | `~/trending-news`  | Where the briefings are saved             |
-| `TRENDING_NEWS_ARGS`| *(empty)*          | Skill arguments, e.g. `AT 5000`           |
-| `TRENDS_GEO`        | *(auto)*           | Fixed country code instead of IP lookup   |
-| `CLAUDE_BIN`        | `claude` on PATH   | Path to the Claude Code CLI               |
-
-The timer runs **locally on purpose**. A cloud-scheduled agent would detect the cloud server's
-location instead of yours. A user timer only runs while you're logged in; `Persistent=true`
-catches up on missed runs. To run it while you're logged out, use `loginctl enable-linger`.
+Use Claude's own scheduler, for example `/schedule` in Claude Code, with the prompt
+`/trending-news --geo DE`. Scheduled agents run in the cloud, where the IP lookup would find the
+server's country instead of yours, so pass your country code with `--geo`.
 
 ## What's inside
 
@@ -106,8 +82,6 @@ catches up on missed runs. To run it while you're logged out, use `loginctl enab
 | `trending-news/SKILL.md` | The workflow the agent follows (frontmatter also names the license and author) |
 | `trending-news/NOTICE` | Author, license, source link and the Buy Me a Coffee link; ships in the zip but the agent doesn't load it |
 | `trending-news/scripts/fetch_trends.py` | Detects the location, fetches and filters the trends, adds news headlines, prints JSON |
-| `scheduler/run-trending-news.sh` | One headless run: saves the briefing and sends a desktop notification |
-| `scheduler/install-timer.sh` | Installs or removes the 4-hour systemd user timer |
 | `install.sh` | Symlinks (or copies) the skill into a skills directory |
 | `build.sh` | Packages the skill as `dist/trending-news.zip` for upload to Claude.ai and other agents |
 | `release.sh` | Tags and pushes a new release version: shows the latest release, suggests the next version |

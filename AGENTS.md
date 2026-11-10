@@ -22,7 +22,6 @@ last 4 hours with 10000+ searches, for the user's location. See `README.md` for 
 | `install.sh` | Symlinks (or `--copy`) the skill into a skills directory |
 | `build.sh` | Validates the frontmatter, runs tests, writes `dist/trending-news.zip` |
 | `release.sh` | Tags `vX.Y.Z` on `main` and pushes it |
-| `scheduler/` | systemd user timer that runs `claude -p "/trending-news"` every 4 hours |
 | `.github/workflows/` | `build.yml` (tests + package on push/PR), `release.yml` (on `v*` tags) |
 
 ## Commands
@@ -34,7 +33,7 @@ python3 -m unittest discover tests          # unit tests (offline)
 ./install.sh                                # ~/.claude/skills/trending-news -> this repo (--help for options)
 ./release.sh --dry-run                      # preview a release; ./release.sh tags and pushes
 python3 trending-news/scripts/fetch_trends.py --help
-for f in *.sh scheduler/*.sh; do bash -n "$f"; done   # shell syntax check, as in CI
+for f in *.sh; do bash -n "$f"; done   # shell syntax check, as in CI
 ```
 
 CI also parses `trending-news/scripts/*.py` with `feature_version=(3,9)` and runs the tests on
@@ -52,8 +51,8 @@ Python 3.9 and 3.x.
 - **Shell scripts:** bash with `set -euo pipefail`, `--help` and explicit error messages to stderr.
 - **Skill output:** the briefing ends without follow-up questions, because scheduled runs save
   the output as-is. Trends without a clear reason are left out, never guessed.
-- **Scheduler runs locally on purpose:** IP-based location detection would report a cloud
-  server's country.
+- **Scheduling** is left to Claude's own scheduler; there is no scheduler in this repo. Cloud
+  runs need `--geo`, because IP-based location detection would report the server's country.
 - **Releases** are tagged from a clean, up-to-date `main`. `release.sh` suggests the bump from
   commit messages since the last tag: `BREAKING` → major, subject starting with `add`/`remove`
   → minor, otherwise patch. Write commit subjects with that in mind.

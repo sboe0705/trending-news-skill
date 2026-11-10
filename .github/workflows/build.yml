@@ -36,7 +36,7 @@ jobs:
       - name: Run unit tests
         run: python3 -m unittest discover -v tests
       - name: Check shell script syntax
-        run: for f in *.sh scheduler/*.sh; do bash -n "$f"; done
+        run: for f in *.sh; do bash -n "$f"; done
 
   package:
     name: Package skill
