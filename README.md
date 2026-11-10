@@ -84,6 +84,7 @@ Each run calls `claude -p "/trending-news"` from this repository and:
 
 - saves the briefing to `~/trending-news/YYYY-MM-DD_HHMM.md`, with `latest.md` linking to the newest one
 - shows a desktop notification with the topic names
+- stays silent when no trend has a clear reason: no file, no notification (the journal notes the run)
 
 You can configure it with environment variables, using `systemctl --user edit trending-news`:
 
