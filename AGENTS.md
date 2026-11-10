@@ -51,7 +51,7 @@ Python 3.9 and 3.x.
   inside it, no caches or dotfiles.
 - **Shell scripts:** bash with `set -euo pipefail`, `--help` and explicit error messages to stderr.
 - **Skill output:** the briefing ends without follow-up questions, because scheduled runs save
-  the output as-is. Unclear reasons are marked as such, never guessed.
+  the output as-is. Trends without a clear reason are left out, never guessed.
 - **Scheduler runs locally on purpose:** IP-based location detection would report a cloud
   server's country.
 - **Releases** are tagged from a clean, up-to-date `main`. `release.sh` suggests the bump from

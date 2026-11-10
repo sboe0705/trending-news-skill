@@ -55,9 +55,8 @@ or "radfahrer"). For each trend:
    run **one** `WebSearch` with the query plus a hint from the `related_queries`.
    Use the location's language, for example `marisa burger rosenheim cops heute`.
    Run all of these searches **in parallel** in one turn.
-3. If it's still unclear, write "Grund unklar" (or the equivalent in the
-   briefing's language) and name the most likely candidate story, marked as
-   "möglicherweise". Never present a guess as fact.
+3. If it's still unclear, leave the trend out of the briefing. Don't add "Grund
+   unklar" entries or guessed candidate stories. Never present a guess as fact.
 4. Link one source per entry, using its headline URL.
 
 ## Step 3 — Write the briefing
@@ -83,6 +82,9 @@ Rules:
 
 - Convert `started_utc` to the user's local time zone (shown as "seit HH:MM").
 - Show the topic as it reads naturally (proper capitalization), not as the raw lowercase query.
+- List only trends with a clear reason (see Step 2). If none is left, write one line
+  instead of entries, for example "Keine der aktuellen Trends lässt sich einer
+  Nachricht zuordnen", and keep the header and the trends page link.
 - Merge trends that are clearly about the same event into one entry, and list the merged search terms.
 - Be neutral and factual. Don't speculate about breaking events such as accidents or crimes.
 - Don't add anything after the briefing: no follow-up questions or offers. In scheduled

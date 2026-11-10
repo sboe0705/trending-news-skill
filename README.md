@@ -128,7 +128,7 @@ python3 trending-news/scripts/fetch_trends.py --help   # the script on its own
 4. **Context:** headlines from the last 24 h from the Google News RSS search for each trend.
 5. **Briefing:** the agent works out why each topic is trending, using a web search only when
    the headlines don't explain it, and writes the briefing in the local language. If the
-   reason is unclear, it says so instead of guessing.
+   reason is unclear, the trend is left out instead of guessed.
 
 **Limitations:** the data comes from the public Trends page and feeds, not an official API. If
 Google changes the page layout, the script falls back to RSS and reports a warning. Search
