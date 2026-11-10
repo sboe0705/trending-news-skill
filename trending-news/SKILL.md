@@ -1,8 +1,10 @@
 ---
 name: trending-news
 description: Summarizes what people are searching for right now — the currently active Google Trends ("Trending now") of the last 4 hours with 10000+ search volume, for the user's current location (auto-detected by IP). Use when the user asks what's trending, what people are talking about / searching for right now, for the latest trending news, "Google Trends", "was ist gerade los", "was trendet gerade", "aktuelle Trends", or runs the scheduled trending-news briefing.
-argument-hint: "[country code e.g. DE] [min volume e.g. 5000]"
 allowed-tools: Bash(python3 *fetch_trends.py*), WebSearch, WebFetch
+license: Apache-2.0
+metadata:
+  author: Sebastian Böhm
 ---
 
 # Trending News Briefing

@@ -20,6 +20,8 @@ Location resolution order:
   3. IP geolocation (ipinfo.io, fallback ipapi.co)
   4. Country part of the system locale (LANG / LC_ALL, e.g. de_DE -> DE)
   5. "DE"
+
+Standard library only, Python 3.9+.
 """
 
 from __future__ import annotations
@@ -32,14 +34,17 @@ import sys
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 
 PAGE_URL = "https://trends.google.com/trending"
 RSS_URL = "https://trends.google.com/trending/rss"
+NEWS_RSS_URL = "https://news.google.com/rss/search"
 HT_NS = "https://trends.google.com/trending/rss"
 UA = "Mozilla/5.0 (X11; Linux x86_64) trending-news-skill/1.0"
 TIMEOUT = 20
+HOURS_CHOICES = (4, 24, 48, 168)
 
 # Main language per country, used for hl= and as the summary language.
 COUNTRY_LANG = {
@@ -69,9 +74,28 @@ def http_get(url: str) -> bytes:
         return resp.read()
 
 
+def _iso(ts: float | None) -> str | None:
+    return datetime.fromtimestamp(ts, timezone.utc).isoformat() if ts else None
+
+
+def _rfc822_to_iso(text: str | None) -> str | None:
+    try:
+        return parsedate_to_datetime(text or "").astimezone(timezone.utc).isoformat()
+    except Exception:
+        return None
+
+
 # --------------------------------------------------------------------------- location
 
-def geo_from_ip() -> tuple[str | None, str | None]:
+def country_from_locale(env: dict) -> str | None:
+    for var in ("LC_ALL", "LC_MESSAGES", "LANG"):
+        m = re.match(r"[a-z]{2,3}_([A-Z]{2})", env.get(var, ""))
+        if m:
+            return m.group(1)
+    return None
+
+
+def country_from_ip() -> tuple[str | None, str | None]:
     """Return (country_code, city) from IP geolocation, or (None, None)."""
     for url, ckey in (("https://ipinfo.io/json", "country"), ("https://ipapi.co/json/", "country_code")):
         try:
@@ -84,59 +108,22 @@ def geo_from_ip() -> tuple[str | None, str | None]:
     return None, None
 
 
-def geo_from_locale() -> str | None:
-    for var in ("LC_ALL", "LC_MESSAGES", "LANG"):
-        m = re.match(r"[a-z]{2,3}_([A-Z]{2})", os.environ.get(var, ""))
-        if m:
-            return m.group(1)
-    return None
-
-
-def resolve_geo(arg_geo: str | None) -> dict:
+def resolve_geo(arg_geo: str | None, env: dict | None = None, ip_lookup=country_from_ip) -> dict:
+    env = os.environ if env is None else env
     if arg_geo:
         return {"geo": arg_geo.upper(), "source": "argument", "city": None}
-    if os.environ.get("TRENDS_GEO"):
-        return {"geo": os.environ["TRENDS_GEO"].upper(), "source": "TRENDS_GEO", "city": None}
-    cc, city = geo_from_ip()
+    if env.get("TRENDS_GEO"):
+        return {"geo": env["TRENDS_GEO"].upper(), "source": "TRENDS_GEO", "city": None}
+    cc, city = ip_lookup()
     if cc:
         return {"geo": cc, "source": "ip-geolocation", "city": city}
-    cc = geo_from_locale()
+    cc = country_from_locale(env)
     if cc:
         return {"geo": cc, "source": "system-locale", "city": None}
     return {"geo": "DE", "source": "default", "city": None}
 
 
-# --------------------------------------------------------------------------- sources
-
-def fetch_page_trends(geo: str, lang: str, hours: int) -> list[dict]:
-    """Parse the trend table embedded in the Trending-now page (AF_initDataCallback 'ds:0')."""
-    qs = urllib.parse.urlencode({"geo": geo, "hours": hours, "sort": "search-volume", "hl": lang})
-    html = http_get(f"{PAGE_URL}?{qs}").decode("utf-8", "replace")
-    m = re.search(r"AF_initDataCallback\(\{key: 'ds:0', hash: '\d+', data:", html)
-    if not m:
-        raise ValueError("trend data block not found in page (layout changed or consent/captcha page)")
-    data, _ = json.JSONDecoder().raw_decode(html, m.end())
-    rows = data[1] or []
-    out = []
-    for r in rows:
-        # r = [query, _, geo, [start_ts], [end_ts]|None, _, volume, _, growth_pct,
-        #      related_queries, category_ids, news_ids, explore_query]
-        start = r[3][0] if r[3] else None
-        end = r[4][0] if r[4] else None
-        out.append({
-            "query": r[0],
-            "volume": int(r[6] or 0),
-            "approx_traffic": f"{int(r[6] or 0)}+",
-            "growth_pct": r[8],
-            "active": end is None,
-            "started_utc": datetime.fromtimestamp(start, timezone.utc).isoformat() if start else None,
-            "ended_utc": datetime.fromtimestamp(end, timezone.utc).isoformat() if end else None,
-            "related_queries": r[9] or [],
-            "categories": [CATEGORIES.get(c, str(c)) for c in (r[10] or [])],
-            "news": [],
-        })
-    return out
-
+# --------------------------------------------------------------------------- parsing
 
 def parse_volume(text: str) -> int:
     """'10000+', '10.000+', '10,000+', '10K+', '2M+' -> int."""
@@ -150,23 +137,46 @@ def parse_volume(text: str) -> int:
     return int(digits) * mult if digits else 0
 
 
-def fetch_rss_trends(geo: str, lang: str) -> list[dict]:
-    qs = urllib.parse.urlencode({"geo": geo, "hl": lang})
-    root = ET.fromstring(http_get(f"{RSS_URL}?{qs}"))
+def parse_page(html: str) -> list[dict]:
+    """Parse the trend table embedded in the Trending-now page (AF_initDataCallback 'ds:0')."""
+    m = re.search(r"AF_initDataCallback\(\{key: 'ds:0', hash: '\d+', data:", html)
+    if not m:
+        raise ValueError("trend data block not found in page (layout changed or consent/captcha page)")
+    data, _ = json.JSONDecoder().raw_decode(html, m.end())
+    rows = (data[1] if isinstance(data, list) and len(data) > 1 else None) or []
+    out = []
+    for r in rows:
+        # r = [query, _, geo, [start_ts], [end_ts]|None, _, volume, _, growth_pct,
+        #      related_queries, category_ids, news_ids, explore_query]
+        start = r[3][0] if r[3] else None
+        end = r[4][0] if r[4] else None
+        volume = int(r[6] or 0)
+        out.append({
+            "query": r[0],
+            "volume": volume,
+            "approx_traffic": f"{volume}+",
+            "growth_pct": r[8],
+            "active": end is None,
+            "started_utc": _iso(start),
+            "ended_utc": _iso(end),
+            "related_queries": r[9] or [],
+            "categories": [CATEGORIES.get(c, str(c)) for c in (r[10] or [])],
+            "news": [],
+        })
+    return out
+
+
+def parse_trends_rss(xml: bytes) -> list[dict]:
     items = []
-    for item in root.iter("item"):
+    for item in ET.fromstring(xml).iter("item"):
         traffic = item.findtext(f"{{{HT_NS}}}approx_traffic", "")
-        try:
-            started = parsedate_to_datetime(item.findtext("pubDate", "")).astimezone(timezone.utc)
-        except Exception:
-            started = None
         items.append({
             "query": item.findtext("title", "").strip(),
             "volume": parse_volume(traffic),
             "approx_traffic": traffic,
             "growth_pct": None,
             "active": None,  # unknown from RSS
-            "started_utc": started.isoformat() if started else None,
+            "started_utc": _rfc822_to_iso(item.findtext("pubDate")),
             "ended_utc": None,
             "related_queries": [],
             "categories": [],
@@ -174,6 +184,7 @@ def fetch_rss_trends(geo: str, lang: str) -> list[dict]:
                 {
                     "title": n.findtext(f"{{{HT_NS}}}news_item_title", "").strip(),
                     "source": n.findtext(f"{{{HT_NS}}}news_item_source", "").strip(),
+                    "published_utc": None,
                     "url": n.findtext(f"{{{HT_NS}}}news_item_url", "").strip(),
                 }
                 for n in item.findall(f"{{{HT_NS}}}news_item")
@@ -182,32 +193,63 @@ def fetch_rss_trends(geo: str, lang: str) -> list[dict]:
     return items
 
 
-def fetch_google_news(query: str, geo: str, lang: str, limit: int = 5) -> list[dict]:
-    """Recent (last 24h) headlines for a query from the public Google News RSS search."""
-    qs = urllib.parse.urlencode({"q": f"{query} when:1d", "hl": lang, "gl": geo, "ceid": f"{geo}:{lang}"})
-    root = ET.fromstring(http_get(f"https://news.google.com/rss/search?{qs}"))
+def parse_news_rss(xml: bytes, limit: int = 5) -> list[dict]:
     out = []
-    for item in list(root.iter("item"))[:limit]:
+    for item in list(ET.fromstring(xml).iter("item"))[:limit]:
         source = item.findtext("source", "").strip()
         title = item.findtext("title", "").strip()
         if source and title.endswith(f" - {source}"):
             title = title[: -len(source) - 3]
-        try:
-            published = parsedate_to_datetime(item.findtext("pubDate", "")).astimezone(timezone.utc).isoformat()
-        except Exception:
-            published = None
-        out.append({"title": title, "source": source, "published_utc": published,
-                    "url": item.findtext("link", "").strip().replace("/rss/articles/", "/articles/")})
+        out.append({
+            "title": title,
+            "source": source,
+            "published_utc": _rfc822_to_iso(item.findtext("pubDate")),
+            # /rss/articles/ is a feed redirect; /articles/ opens in a browser
+            "url": item.findtext("link", "").strip().replace("/rss/articles/", "/articles/"),
+        })
     return out
 
 
-def add_google_news(trends: list[dict], geo: str, lang: str, warnings: list[str]) -> None:
-    from concurrent.futures import ThreadPoolExecutor
+def select_trends(trends: list[dict], now: datetime, hours: float, min_volume: int,
+                  include_ended: bool = False) -> list[dict]:
+    cutoff = now - timedelta(hours=hours)
+    selected = [
+        t for t in trends
+        if t["volume"] >= min_volume
+        and (include_ended or t["active"] is not False)
+        and t["started_utc"] and datetime.fromisoformat(t["started_utc"]) >= cutoff
+    ]
+    selected.sort(key=lambda t: (t["volume"], t["growth_pct"] or 0), reverse=True)
+    return selected
 
+
+def merge_news(target: list[dict], extra: list[dict]) -> None:
+    seen = {n["title"] for n in target}
+    target.extend(n for n in extra if n["title"] not in seen)
+
+
+# --------------------------------------------------------------------------- network
+
+def fetch_page_trends(geo: str, lang: str, hours: int) -> list[dict]:
+    qs = urllib.parse.urlencode({"geo": geo, "hours": hours, "sort": "search-volume", "hl": lang})
+    return parse_page(http_get(f"{PAGE_URL}?{qs}").decode("utf-8", "replace"))
+
+
+def fetch_rss_trends(geo: str, lang: str) -> list[dict]:
+    qs = urllib.parse.urlencode({"geo": geo, "hl": lang})
+    return parse_trends_rss(http_get(f"{RSS_URL}?{qs}"))
+
+
+def fetch_google_news(query: str, geo: str, lang: str) -> list[dict]:
+    """Recent (last 24h) headlines for a query from the public Google News RSS search."""
+    qs = urllib.parse.urlencode({"q": f"{query} when:1d", "hl": lang, "gl": geo, "ceid": f"{geo}:{lang}"})
+    return parse_news_rss(http_get(f"{NEWS_RSS_URL}?{qs}"))
+
+
+def add_google_news(trends: list[dict], geo: str, lang: str, warnings: list[str]) -> None:
     def work(t: dict) -> None:
         try:
-            seen = {n["title"] for n in t["news"]}
-            t["news"] += [n for n in fetch_google_news(t["query"], geo, lang) if n["title"] not in seen]
+            merge_news(t["news"], fetch_google_news(t["query"], geo, lang))
         except Exception as e:
             warnings.append(f"Google News lookup failed for '{t['query']}': {e}")
 
@@ -217,21 +259,23 @@ def add_google_news(trends: list[dict], geo: str, lang: str, warnings: list[str]
 
 # --------------------------------------------------------------------------- main
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--geo", help="Two-letter country code (overrides auto-detection)")
-    ap.add_argument("--hours", type=int, default=4, choices=[4, 24, 48, 168],
+    ap.add_argument("--hours", type=int, default=4, choices=HOURS_CHOICES,
                     help="Time window as offered by Google Trends (default 4)")
     ap.add_argument("--min-volume", type=int, default=10000, help="Minimum approx. search volume (default 10000)")
     ap.add_argument("--include-ended", action="store_true", help="Also include trends that are no longer active")
     ap.add_argument("--lang", help="Language (default: main language of the country)")
     ap.add_argument("--no-news", action="store_true", help="Skip the Google News headline lookup")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
+
+    if args.geo and not re.fullmatch(r"[A-Za-z]{2}", args.geo):
+        ap.error("--geo must be a two-letter country code, e.g. DE")
 
     loc = resolve_geo(args.geo)
     lang = args.lang or COUNTRY_LANG.get(loc["geo"], "en")
     now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(hours=args.hours)
     warnings: list[str] = []
 
     rss: list[dict] = []
@@ -243,31 +287,19 @@ def main() -> int:
     source = "trending-page"
     try:
         trends = fetch_page_trends(loc["geo"], lang, args.hours)
+        news_by_query = {r["query"].lower(): r["news"] for r in rss}
+        for t in trends:
+            t["news"] = list(news_by_query.get(t["query"].lower(), []))
     except Exception as e:
         warnings.append(f"Trending page unavailable, fell back to RSS (only ~10 newest trends, "
                         f"active status unknown): {e}")
         trends, source = rss, "rss-fallback"
+        if not rss:
+            print(json.dumps({"error": "Could not fetch Google Trends data", "warnings": warnings,
+                              "location": loc}, ensure_ascii=False, indent=2))
+            return 1
 
-    if source == "trending-page":
-        # Attach RSS news headlines to matching page trends.
-        news_by_query = {r["query"].lower(): r["news"] for r in rss}
-        for t in trends:
-            t["news"] = news_by_query.get(t["query"].lower(), [])
-
-    if not trends and not warnings:
-        warnings.append("No trends returned at all.")
-    if source == "rss-fallback" and not rss:
-        print(json.dumps({"error": "Could not fetch Google Trends data", "warnings": warnings,
-                          "location": loc}, ensure_ascii=False, indent=2))
-        return 1
-
-    selected = [
-        t for t in trends
-        if t["volume"] >= args.min_volume
-        and (args.include_ended or t["active"] is not False)
-        and t["started_utc"] and datetime.fromisoformat(t["started_utc"]) >= cutoff
-    ]
-    selected.sort(key=lambda t: (t["volume"], t["growth_pct"] or 0), reverse=True)
+    selected = select_trends(trends, now, args.hours, args.min_volume, args.include_ended)
     if not args.no_news:
         add_google_news(selected, loc["geo"], lang, warnings)
 

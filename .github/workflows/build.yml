@@ -1,0 +1,59 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Python 3.9 builds only exist up to Ubuntu 24.04
+          - python: "3.9"
+            os: ubuntu-24.04
+          - python: "3.x"
+            os: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Check Python 3.9 syntax
+        run: |
+          for f in trending-news/scripts/*.py; do
+            python3 -c "import ast, sys; ast.parse(open(sys.argv[1]).read(), feature_version=(3,9))" "$f"
+          done
+      # stdlib only: no dependencies to install; the tests run offline
+      - name: Run unit tests
+        run: python3 -m unittest discover -v tests
+      - name: Check shell script syntax
+        run: for f in *.sh scheduler/*.sh; do bash -n "$f"; done
+
+  package:
+    name: Package skill
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+      - name: Build zip
+        run: ./build.sh --skip-tests
+      # archive: false uploads the zip as-is instead of wrapping it in a
+      # second zip; the artifact is then named after the file
+      # (trending-news.zip) and can be uploaded to an agent directly.
+      - uses: actions/upload-artifact@v7
+        with:
+          path: dist/trending-news.zip
+          archive: false
+          if-no-files-found: error
