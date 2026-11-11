@@ -10,12 +10,13 @@ Guidance for coding agents working in this repository.
 ## What this is
 
 `trending-news` is an Agent Skill: a short briefing on the currently active Google Trends of the
-last 4 hours with 10000+ searches, for the user's location. See `README.md` for user docs.
+last 4 hours with 10000+ searches, for the user's location, with news from Google News (GDELT
+as fallback) and optionally the most-read Wikipedia articles. See `README.md` for user docs.
 
 | Path | Purpose |
 |---|---|
 | `trending-news/SKILL.md` | The skill workflow the agent follows (frontmatter + instructions) |
-| `trending-news/scripts/fetch_trends.py` | Detects the location, fetches/filters trends, adds news headlines, prints JSON |
+| `trending-news/scripts/fetch_trends.py` | Detects the location, fetches/filters trends, adds news headlines (Google News, GDELT), optional Wikipedia top articles, prints JSON |
 | `trending-news/NOTICE` | Author, license, links; ships in the zip |
 | `.claude/skills/trending-news` | Symlink to `trending-news/`, so the skill works inside this repo without installing |
 | `tests/test_fetch_trends.py` | Offline unit tests for `fetch_trends.py` |

@@ -148,6 +148,87 @@ class MergeNewsTest(unittest.TestCase):
         self.assertEqual([n["title"] for n in target], ["A", "B"])
 
 
+GDELT_JSON = json.dumps({"articles": [
+    {"url": "https://example.de/a", "title": " Sturm über Portugal ", "seendate": "20261110T150000Z",
+     "domain": "example.de", "language": "German"},
+    {"url": "https://example.de/b", "title": "Ohne Datum", "seendate": "", "domain": "example.de"},
+]}).encode()
+
+WIKI_JSON = json.dumps({"items": [{"project": "de.wikipedia", "articles": [
+    {"article": "Wikipedia:Hauptseite", "views": 900000, "rank": 1},
+    {"article": "Spezial:Suche", "views": 500000, "rank": 2},
+    {"article": "Marisa_Burger", "views": 80000, "rank": 3},
+    {"article": "Benutzer_Diskussion:X", "views": 70000, "rank": 4},
+    {"article": "Star_Wars:_Andor", "views": 60000, "rank": 5},
+    {"article": "-", "views": 50000, "rank": 6},
+    {"article": "Datei:Bild.jpg", "views": 40000, "rank": 7},
+    {"article": "Österreich", "views": 30000, "rank": 8},
+]}]}).encode()
+
+
+class ParseGdeltTest(unittest.TestCase):
+    def test_articles(self):
+        news = ft.parse_gdelt(GDELT_JSON)
+        self.assertEqual(news[0], {"title": "Sturm über Portugal", "source": "example.de",
+                                   "published_utc": "2026-11-10T15:00:00+00:00",
+                                   "url": "https://example.de/a", "via": "gdelt"})
+        self.assertIsNone(news[1]["published_utc"])
+        self.assertEqual(len(ft.parse_gdelt(GDELT_JSON, limit=1)), 1)
+
+    def test_empty_and_errors(self):
+        self.assertEqual(ft.parse_gdelt(b""), [])
+        self.assertEqual(ft.parse_gdelt(b"{}"), [])
+        with self.assertRaises(ValueError):
+            ft.parse_gdelt(b"Please limit requests to one every 5 seconds.")
+
+    def test_query(self):
+        self.assertEqual(ft.gdelt_query('marisa "burger"', "de"), '"marisa burger" sourcelang:german')
+        self.assertEqual(ft.gdelt_query("hornissen", "de"), "hornissen sourcelang:german")
+        self.assertEqual(ft.gdelt_query("x y", "xx"), '"x y"')
+
+
+class AddGdeltNewsTest(unittest.TestCase):
+    def test_only_items_without_news_sequential_with_delay(self):
+        items = [{"query": "a", "news": [{"title": "has"}]}, {"query": "b", "news": []},
+                 {"query": "c", "news": []}]
+        calls, sleeps, warnings = [], [], []
+
+        def fetch(q, lang, span):
+            calls.append((q, lang, span))
+            if q == "c":
+                raise ValueError("boom")
+            return [{"title": f"{q} news"}]
+
+        ft.add_gdelt_news(items, "de", warnings, fetch=fetch, sleep=sleeps.append)
+        self.assertEqual(calls, [("b", "de", "1d"), ("c", "de", "1d")])
+        self.assertEqual(sleeps, [ft.GDELT_DELAY])
+        self.assertEqual(items[1]["news"], [{"title": "b news"}])
+        self.assertEqual(items[2]["news"], [])
+        self.assertEqual(len(warnings), 1)
+
+    def test_limit(self):
+        items = [{"query": str(i), "news": []} for i in range(ft.GDELT_MAX_LOOKUPS + 2)]
+        calls, warnings = [], []
+        ft.add_gdelt_news(items, "de", warnings, fetch=lambda q, l, s: calls.append(q) or [],
+                          sleep=lambda s: None)
+        self.assertEqual(len(calls), ft.GDELT_MAX_LOOKUPS)
+        self.assertIn("limited", warnings[0])
+
+
+class ParseWikiTopTest(unittest.TestCase):
+    def test_filters_non_articles(self):
+        top = ft.parse_wiki_top(WIKI_JSON, "de")
+        self.assertEqual([a["title"] for a in top], ["Marisa Burger", "Star Wars: Andor", "Österreich"])
+        self.assertEqual([a["rank"] for a in top], [1, 2, 3])
+        self.assertEqual(top[0]["views"], 80000)
+        self.assertEqual(top[0]["url"], "https://de.wikipedia.org/wiki/Marisa_Burger")
+        self.assertEqual(top[2]["url"], "https://de.wikipedia.org/wiki/%C3%96sterreich")
+        self.assertEqual(top[0]["news"], [])
+
+    def test_limit(self):
+        self.assertEqual(len(ft.parse_wiki_top(WIKI_JSON, "de", limit=2)), 2)
+
+
 class ResolveGeoTest(unittest.TestCase):
     def no_ip(self):
         return None, None

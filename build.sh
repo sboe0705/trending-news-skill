@@ -141,4 +141,5 @@ PY
 SIZE=$(du -h "$OUTPUT" | cut -f1)
 echo "Wrote $OUTPUT ($SIZE)"
 echo "Upload it in Claude.ai under Settings → Capabilities → Skills (code execution must be on,"
-echo "with network access allowed for trends.google.com, news.google.com and ipinfo.io)."
+echo "with network access allowed for trends.google.com, news.google.com, api.gdeltproject.org,
+ipinfo.io and wikimedia.org)."

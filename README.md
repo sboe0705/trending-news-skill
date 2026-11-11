@@ -5,7 +5,8 @@
 An [Agent Skill](https://docs.claude.com/en/docs/agents-and-tools/agent-skills/overview) that tells you
 what people around you are searching for right now. It's a short news briefing on the **currently
 active Google Trends of the last 4 hours with 10000+ searches**, for your current location.
-In Claude Code it can run every 4 hours on its own.
+In Claude Code it can run every 4 hours on its own. On request it also lists the most-read
+Wikipedia articles of the last day.
 
 ## Example
 
@@ -23,7 +24,7 @@ In Claude Code it can run every 4 hours on its own.
 ```
 
 Use it with `/trending-news`, `/trending-news AT` (another country), `/trending-news US 5000`
-(another threshold), or just ask "Was trendet gerade?" or "What's trending right now?".
+(another threshold), `/trending-news --wikipedia` (with the Wikipedia top articles), or just ask "Was trendet gerade?" or "What's trending right now?".
 
 ## Install
 
@@ -52,7 +53,8 @@ Inside this repository the skill also works without installing it, through
 **Claude.ai / Claude Desktop:** download `trending-news.zip` from the
 [latest release](https://github.com/sboe0705/trending-news-skill/releases/latest) and upload it
 under *Settings → Capabilities → Skills*. Code execution must be turned on, and the sandbox needs
-network access to `trends.google.com`, `news.google.com` and `ipinfo.io`. The sandbox runs in the
+network access to `trends.google.com`, `news.google.com`, `api.gdeltproject.org` and `ipinfo.io`
+(plus `wikimedia.org` for `--wikipedia`). The sandbox runs in the
 cloud, so IP detection reports the server's country, not yours. Name the country there, e.g.
 "Trends in Deutschland". Or build the zip yourself:
 
@@ -74,6 +76,9 @@ Python 3.9+ and no third-party packages.
 Use Claude's own scheduler, for example `/schedule` in Claude Code, with the prompt
 `/trending-news --geo DE`. Scheduled agents run in the cloud, where the IP lookup would find the
 server's country instead of yours, so pass your country code with `--geo`.
+
+The Wikipedia numbers only change once a day, so add `--wikipedia` to one run a day only, for
+example the one around 11:00.
 
 ## What's inside
 
@@ -101,7 +106,13 @@ python3 trending-news/scripts/fetch_trends.py --help   # the script on its own
    feed, which only has the ~10 newest trends and no active status.
 3. **Filter:** active, started ≤ 4 h ago, ≥ 10000 searches, sorted by volume.
 4. **Context:** headlines from the last 24 h from the Google News RSS search for each trend.
-5. **Briefing:** the agent works out why each topic is trending, using a web search only when
+   Trends without a Google News headline are looked up in the
+   [GDELT DOC API](https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/) (one request every
+   5 s, at most 8 lookups per run).
+5. **Wikipedia** (`--wikipedia`): the most-read articles of the last full day from the
+   Wikimedia pageviews API, in the location's language (`de.wikipedia` for DE, AT and CH),
+   without the main page and special pages, with news headlines of the last 2 days.
+6. **Briefing:** the agent works out why each topic is trending, using a web search only when
    the headlines don't explain it, and writes the briefing in the local language. If the
    reason is unclear, the trend is left out instead of guessed.
 

@@ -10,6 +10,10 @@ Fallback: Google's public Trending RSS feed (only the ~10 newest trends).
 
 News context: headlines from the trending RSS feed (when the trend is in it)
 plus the public Google News RSS search (last 24h) for each selected trend.
+Trends that still have no headline are looked up in the GDELT DOC API.
+
+Optional (--wikipedia): the most-read Wikipedia articles of the last full day
+in the location's language (Wikimedia pageviews API), with news context too.
 
 Filters to trends that are still active, started within the last N hours and
 have at least the given approximate search volume. Prints JSON to stdout.
@@ -31,16 +35,21 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 
 PAGE_URL = "https://trends.google.com/trending"
 RSS_URL = "https://trends.google.com/trending/rss"
 NEWS_RSS_URL = "https://news.google.com/rss/search"
+GDELT_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
+GDELT_DELAY = 5.5  # GDELT allows one request every 5 seconds
+GDELT_MAX_LOOKUPS = 8
+WIKI_TOP_URL = "https://wikimedia.org/api/rest_v1/metrics/pageviews/top"
 HT_NS = "https://trends.google.com/trending/rss"
 UA = "Mozilla/5.0 (X11; Linux x86_64) trending-news-skill/1.0"
 TIMEOUT = 20
@@ -56,6 +65,23 @@ COUNTRY_LANG = {
     "SE": "sv", "NO": "no", "DK": "da", "FI": "fi", "CZ": "cs",
     "TR": "tr", "JP": "ja", "KR": "ko",
 }
+
+# GDELT sourcelang names for the languages above.
+GDELT_LANG = {
+    "de": "german", "en": "english", "fr": "french", "es": "spanish", "it": "italian",
+    "nl": "dutch", "pl": "polish", "pt": "portuguese", "sv": "swedish", "no": "norwegian",
+    "da": "danish", "fi": "finnish", "cs": "czech", "tr": "turkish", "ja": "japanese",
+    "ko": "korean",
+}
+
+# Wikipedia namespaces (English and local names) that are not articles.
+WIKI_NON_ARTICLE = re.compile(
+    r"^(Special|Spezial|Wikipedia|WP|File|Datei|Help|Hilfe|Portal|User|Benutzer|Category|"
+    r"Kategorie|Template|Vorlage|Talk|Diskussion|Spécial|Fichier|Aide|Especial|Archivo|"
+    r"Ayuda|Speciale|Speciaal|Specjalna|Plik|Pomoc)(_talk|_Diskussion)?:", re.I)
+WIKI_MAIN_PAGES = {"-", "Main_Page", "Hauptseite", "Wikipedia:Hauptseite", "Accueil",
+                   "Wikipédia:Accueil_principal", "Portada", "Pagina_principale",
+                   "Hoofdpagina", "Wikipedia:Strona_główna", "Wikipédia:Página_principal"}
 
 # Google Trends "Trending now" category ids.
 CATEGORIES = {
@@ -210,6 +236,60 @@ def parse_news_rss(xml: bytes, limit: int = 5) -> list[dict]:
     return out
 
 
+def parse_gdelt(body: bytes, limit: int = 5) -> list[dict]:
+    """Parse a GDELT DOC API artlist response. GDELT answers errors as plain text."""
+    text = body.decode("utf-8", "replace").strip()
+    if not text:
+        return []  # no matches
+    try:
+        data = json.loads(text)
+    except ValueError:
+        raise ValueError(f"GDELT: {text[:200]}")
+    out = []
+    for a in (data.get("articles") or [])[:limit]:
+        try:
+            published = datetime.strptime(a.get("seendate", ""), "%Y%m%dT%H%M%SZ") \
+                .replace(tzinfo=timezone.utc).isoformat()
+        except ValueError:
+            published = None
+        out.append({
+            "title": (a.get("title") or "").strip(),
+            "source": a.get("domain") or "",
+            "published_utc": published,
+            "url": a.get("url") or "",
+            "via": "gdelt",
+        })
+    return out
+
+
+def gdelt_query(query: str, lang: str) -> str:
+    """Quote multi-word queries as a phrase and restrict to the location's language."""
+    q = query.replace('"', "").strip()
+    q = f'"{q}"' if " " in q else q
+    src = GDELT_LANG.get(lang)
+    return f"{q} sourcelang:{src}" if src else q
+
+
+def parse_wiki_top(body: bytes, lang: str, limit: int = 10) -> list[dict]:
+    """Most-viewed articles from a Wikimedia pageviews 'top' response, without non-articles."""
+    items = json.loads(body)["items"][0]
+    out = []
+    for a in items["articles"]:
+        title = a["article"]
+        if title in WIKI_MAIN_PAGES or WIKI_NON_ARTICLE.match(title):
+            continue
+        out.append({
+            "title": title.replace("_", " "),
+            "rank": len(out) + 1,
+            "views": a["views"],
+            "url": f"https://{lang}.wikipedia.org/wiki/{urllib.parse.quote(title)}",
+            "news": [],
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
 def select_trends(trends: list[dict], now: datetime, hours: float, min_volume: int,
                   include_ended: bool = False) -> list[dict]:
     cutoff = now - timedelta(hours=hours)
@@ -240,21 +320,63 @@ def fetch_rss_trends(geo: str, lang: str) -> list[dict]:
     return parse_trends_rss(http_get(f"{RSS_URL}?{qs}"))
 
 
-def fetch_google_news(query: str, geo: str, lang: str) -> list[dict]:
-    """Recent (last 24h) headlines for a query from the public Google News RSS search."""
-    qs = urllib.parse.urlencode({"q": f"{query} when:1d", "hl": lang, "gl": geo, "ceid": f"{geo}:{lang}"})
+def fetch_google_news(query: str, geo: str, lang: str, window: str = "1d") -> list[dict]:
+    """Recent headlines (default last 24h) for a query from the public Google News RSS search."""
+    qs = urllib.parse.urlencode({"q": f"{query} when:{window}", "hl": lang, "gl": geo, "ceid": f"{geo}:{lang}"})
     return parse_news_rss(http_get(f"{NEWS_RSS_URL}?{qs}"))
 
 
-def add_google_news(trends: list[dict], geo: str, lang: str, warnings: list[str]) -> None:
+def fetch_gdelt(query: str, lang: str, timespan: str = "1d") -> list[dict]:
+    qs = urllib.parse.urlencode({"query": gdelt_query(query, lang), "mode": "artlist",
+                                 "maxrecords": 5, "format": "json", "timespan": timespan,
+                                 "sort": "datedesc"})
+    return parse_gdelt(http_get(f"{GDELT_URL}?{qs}"))
+
+
+def fetch_wiki_top(lang: str, day: date) -> list[dict]:
+    url = f"{WIKI_TOP_URL}/{lang}.wikipedia/all-access/{day:%Y/%m/%d}"
+    return parse_wiki_top(http_get(url), lang)
+
+
+def wiki_top_latest(lang: str, today: date, warnings: list[str]) -> tuple[str | None, list[dict]]:
+    """Top articles of yesterday, or the day before if yesterday isn't published yet."""
+    err = None
+    for back in (1, 2):
+        day = today - timedelta(days=back)
+        try:
+            return day.isoformat(), fetch_wiki_top(lang, day)
+        except Exception as e:
+            err = e
+    warnings.append(f"Wikipedia top articles unavailable: {err}")
+    return None, []
+
+
+def add_google_news(items: list[dict], geo: str, lang: str, warnings: list[str],
+                    key: str = "query", window: str = "1d") -> None:
     def work(t: dict) -> None:
         try:
-            merge_news(t["news"], fetch_google_news(t["query"], geo, lang))
+            merge_news(t["news"], fetch_google_news(t[key], geo, lang, window))
         except Exception as e:
-            warnings.append(f"Google News lookup failed for '{t['query']}': {e}")
+            warnings.append(f"Google News lookup failed for '{t[key]}': {e}")
 
     with ThreadPoolExecutor(max_workers=6) as pool:
-        list(pool.map(work, trends))
+        list(pool.map(work, items))
+
+
+def add_gdelt_news(items: list[dict], lang: str, warnings: list[str], key: str = "query",
+                   timespan: str = "1d", fetch=fetch_gdelt, sleep=time.sleep) -> None:
+    """GDELT headlines for items without any news. Sequential, GDELT rate-limits hard."""
+    todo = [t for t in items if not t["news"]]
+    if len(todo) > GDELT_MAX_LOOKUPS:
+        warnings.append(f"GDELT lookup limited to {GDELT_MAX_LOOKUPS} of {len(todo)} items without news")
+        todo = todo[:GDELT_MAX_LOOKUPS]
+    for i, t in enumerate(todo):
+        if i:
+            sleep(GDELT_DELAY)
+        try:
+            merge_news(t["news"], fetch(t[key], lang, timespan))
+        except Exception as e:
+            warnings.append(f"GDELT lookup failed for '{t[key]}': {e}")
 
 
 # --------------------------------------------------------------------------- main
@@ -267,7 +389,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--min-volume", type=int, default=10000, help="Minimum approx. search volume (default 10000)")
     ap.add_argument("--include-ended", action="store_true", help="Also include trends that are no longer active")
     ap.add_argument("--lang", help="Language (default: main language of the country)")
-    ap.add_argument("--no-news", action="store_true", help="Skip the Google News headline lookup")
+    ap.add_argument("--no-news", action="store_true", help="Skip the news lookups (Google News and GDELT)")
+    ap.add_argument("--wikipedia", action="store_true",
+                    help="Also list the most-read Wikipedia articles of the last full day")
     args = ap.parse_args(argv)
 
     if args.geo and not re.fullmatch(r"[A-Za-z]{2}", args.geo):
@@ -303,7 +427,17 @@ def main(argv: list[str] | None = None) -> int:
     if not args.no_news:
         add_google_news(selected, loc["geo"], lang, warnings)
 
-    print(json.dumps({
+    wiki_day, wiki = None, []
+    if args.wikipedia:
+        wiki_day, wiki = wiki_top_latest(lang, now.date(), warnings)
+        if not args.no_news:
+            add_google_news(wiki, loc["geo"], lang, warnings, key="title", window="2d")
+
+    if not args.no_news:
+        add_gdelt_news(selected, lang, warnings)
+        add_gdelt_news(wiki, lang, warnings, key="title", timespan="2d")
+
+    out = {
         "fetched_at_utc": now.isoformat(timespec="seconds"),
         "source": source,
         "location": {**loc, "language": lang},
@@ -312,7 +446,10 @@ def main(argv: list[str] | None = None) -> int:
         "trends_page": f"{PAGE_URL}?geo={loc['geo']}&hours={args.hours}&sort=search-volume&status=active",
         "warnings": warnings,
         "trends": selected,
-    }, ensure_ascii=False, indent=2))
+    }
+    if args.wikipedia:
+        out["wikipedia"] = {"project": f"{lang}.wikipedia", "date": wiki_day, "articles": wiki}
+    print(json.dumps(out, ensure_ascii=False, indent=2))
     return 0
 
 
